@@ -2,6 +2,8 @@
 
 A clean desktop app to merge PDF files, built with pywebview + pypdf.
 
+Latest release:(https://github.com/lukeMiP/z-merge/releases/latest)
+
 ## Setup
 
 ```bash
@@ -31,4 +33,4 @@ python app.py
 2. Drag the rows to reorder them — the merge order matches the list order
 3. Type your desired output filename in the bottom field (`.pdf` is added automatically)
 4. Click **Merge PDFs**
-5. The merged file is saved to the same folder as your first input file
+5. Select the destination file location
