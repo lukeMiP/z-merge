@@ -1,6 +1,7 @@
 import webview
 import os
 import sys
+from urllib.parse import unquote, urlparse
 from pypdf import PdfWriter, PdfReader
 
 
@@ -12,6 +13,15 @@ def resource_path(relative):
 
 
 class API:
+    def _normalize_input_path(self, path):
+        if isinstance(path, str) and path.startswith("file://"):
+            parsed = urlparse(path)
+            normalized = unquote(parsed.path)
+            if os.name == "nt" and normalized.startswith("/"):
+                normalized = normalized[1:]
+            return normalized
+        return path
+
     def merge_pdfs(self, file_paths, output_path):
         try:
             if not file_paths:
@@ -25,6 +35,7 @@ class API:
 
             writer = PdfWriter()
             for path in file_paths:
+                path = self._normalize_input_path(path)
                 reader = PdfReader(path)
                 for page in reader.pages:
                     writer.add_page(page)
