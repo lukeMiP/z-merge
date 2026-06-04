@@ -89,7 +89,7 @@ with open(resource_path("index.html"), "r") as f:
     html = f.read()
 
 window = webview.create_window(
-    "PDF Merger",
+    "z-merge",
     html=html,
     js_api=api,
     width=700,
