@@ -444,6 +444,22 @@
 let files = [];
 let dragSrcIndex = null;
 
+function fileKey(f) {
+  if (f.path) return `path:${String(f.path).toLowerCase()}`;
+  return `name:${String(f.name).toLowerCase()}|size:${String(f.size)}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
 function openFilePicker() {
   if (typeof pywebview !== 'undefined') {
     pywebview.api.open_file_dialog().then(result => {
@@ -456,11 +472,13 @@ function openFilePicker() {
 }
 
 function addFiles(newFiles) {
-  const existing = new Set(files.map(f => f.path));
+  const existing = new Set(files.map(fileKey));
   let added = 0;
   for (const f of newFiles) {
-    if (!existing.has(f.path)) {
+    const key = fileKey(f);
+    if (!existing.has(key)) {
       files.push(f);
+      existing.add(key);
       added++;
     }
   }
@@ -504,7 +522,7 @@ function renderList() {
       </div>
       <div class="file-icon">PDF</div>
       <div class="file-info">
-        <div class="file-name" title="${escHtml(f.path)}">${escHtml(f.name)}</div>
+        <div class="file-name" title="${escHtml(String(f.path || f.name || ''))}">${escHtml(String(f.name || 'Untitled.pdf'))}</div>
         <div class="file-size">${f.size}</div>
       </div>
       <span class="file-order">${i + 1}</span>
@@ -571,25 +589,95 @@ function fileUriToPath(uri) {
   return path;
 }
 
+function fileNameFromPath(path) {
+  const normalized = String(path || '').replace(/\\/g, '/');
+  return normalized.split('/').pop() || path;
+}
+
+function extractDroppedPaths(dataTransfer) {
+  const rawChunks = [
+    dataTransfer.getData('text/uri-list') || '',
+    dataTransfer.getData('text/plain') || '',
+    dataTransfer.getData('text') || ''
+  ];
+
+  const tokens = rawChunks
+    .flatMap(chunk => chunk.split(/\r?\n/))
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'));
+
+  const seen = new Set();
+  const paths = [];
+
+  for (const token of tokens) {
+    let candidate = token;
+
+    if (candidate.startsWith('file://')) {
+      candidate = fileUriToPath(candidate) || candidate;
+    }
+
+    if (/^\/[a-zA-Z]:\//.test(candidate)) {
+      candidate = candidate.slice(1);
+    }
+
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    paths.push(candidate);
+  }
+
+  return paths;
+}
+
 // Drop zone drag events
 const dz = document.getElementById('dropzone');
 dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
 dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-dz.addEventListener('drop', e => {
+dz.addEventListener('drop', async e => {
   e.preventDefault();
   dz.classList.remove('drag-over');
-  const droppedUris = (e.dataTransfer.getData('text/uri-list') || '')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line && !line.startsWith('#'));
-  // Native file drop — convert to our format
-  const dropped = Array.from(e.dataTransfer.files)
-    .filter(f => f.name.toLowerCase().endsWith('.pdf'))
-    .map((f, i) => ({
-      path: fileUriToPath(droppedUris[i]) || f.path || f.name,
-      name: f.name,
-      size: formatSize(f.size)
-    }));
+  const extractedPaths = extractDroppedPaths(e.dataTransfer);
+  const droppedFiles = Array.from(e.dataTransfer.files);
+  const droppedUriPaths = extractedPaths
+    .filter(path => path.toLowerCase().endsWith('.pdf'));
+
+  const dropped = [];
+  let unresolvedCount = 0;
+
+  if (droppedUriPaths.length > 0) {
+    for (let i = 0; i < droppedUriPaths.length; i++) {
+      const path = droppedUriPaths[i];
+      const matching = droppedFiles[i] || droppedFiles.find(f => f.name === fileNameFromPath(path));
+      const matchingPath = droppedFiles[i]?.path || path;
+      const data = matching ? arrayBufferToBase64(await matching.arrayBuffer()) : null;
+      dropped.push({
+        path: matchingPath,
+        name: fileNameFromPath(path),
+        size: matching ? formatSize(matching.size) : 'Unknown size',
+        data
+      });
+    }
+  } else {
+    for (const f of droppedFiles) {
+      if (!f.name.toLowerCase().endsWith('.pdf')) continue;
+      // Different pywebview engines expose file paths differently.
+      // Prefer f.path when available, but gracefully fall back so drag-drop still works.
+      const byName = extractedPaths.find(p => fileNameFromPath(p).toLowerCase() === f.name.toLowerCase());
+      const resolvedPath = f.path || byName || fileUriToPath(f.name) || f.name;
+      if (!resolvedPath) unresolvedCount++;
+      const data = arrayBufferToBase64(await f.arrayBuffer());
+      dropped.push({
+        path: resolvedPath,
+        name: f.name,
+        size: formatSize(f.size),
+        data
+      });
+    }
+  }
+
+  if (unresolvedCount > 0) {
+    showToast('Some dropped files could not be resolved. Use Click to add PDFs.', 'error');
+  }
+
   if (dropped.length) addFiles(dropped);
 });
 
@@ -603,7 +691,7 @@ function mergePDFs() {
   if (files.length < 2) return;
   const suggested = document.getElementById('output-name').value.trim() || 'merged';
   const btn = document.getElementById('merge-btn');
-  const paths = files.map(f => f.path);
+  const payload = files.map(f => ({ path: f.path || null, name: f.name || null, data: f.data || null }));
 
   if (typeof pywebview === 'undefined') return;
 
@@ -625,7 +713,7 @@ function mergePDFs() {
       </svg>
       Merging…`;
 
-    pywebview.api.merge_pdfs(paths, savePath).then(result => {
+    pywebview.api.merge_pdfs(payload, savePath).then(result => {
       btn.disabled = false;
       btn.innerHTML = mergeButtonHTML();
       if (result.success) {
@@ -651,7 +739,7 @@ function showToast(msg, type) {
 }
 
 function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // Spin animation

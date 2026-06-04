@@ -1,6 +1,8 @@
 import webview
 import os
 import sys
+import base64
+from io import BytesIO
 from urllib.parse import unquote, urlparse
 from pypdf import PdfWriter, PdfReader
 
@@ -14,13 +16,27 @@ def resource_path(relative):
 
 class API:
     def _normalize_input_path(self, path):
-        if isinstance(path, str) and path.startswith("file://"):
-            parsed = urlparse(path)
-            normalized = unquote(parsed.path)
-            if os.name == "nt" and normalized.startswith("/"):
+        if not isinstance(path, str):
+            return path
+
+        candidate = path.strip().strip('"')
+
+        if candidate.startswith("file://"):
+            parsed = urlparse(candidate)
+
+            if os.name == "nt" and parsed.netloc and parsed.path:
+                normalized = unquote(f"{parsed.netloc}{parsed.path}")
+            elif parsed.netloc and parsed.netloc.lower() != "localhost":
+                normalized = unquote(f"//{parsed.netloc}{parsed.path}")
+            else:
+                normalized = unquote(parsed.path)
+
+            if os.name == "nt" and len(normalized) > 2 and normalized[0] == "/" and normalized[2] == ":":
                 normalized = normalized[1:]
-            return normalized
-        return path
+
+            return os.path.normpath(normalized)
+
+        return os.path.normpath(candidate)
 
     def merge_pdfs(self, file_paths, output_path):
         try:
@@ -34,9 +50,28 @@ class API:
                 output_path += ".pdf"
 
             writer = PdfWriter()
-            for path in file_paths:
-                path = self._normalize_input_path(path)
-                reader = PdfReader(path)
+            for item in file_paths:
+                reader = None
+
+                if isinstance(item, dict):
+                    raw_data = item.get("data")
+                    if raw_data:
+                        try:
+                            pdf_bytes = base64.b64decode(raw_data)
+                            reader = PdfReader(BytesIO(pdf_bytes))
+                        except Exception:
+                            name = item.get("name") or "dropped file"
+                            return {"success": False, "error": f"Invalid PDF data: {name}"}
+                    else:
+                        path = self._normalize_input_path(item.get("path"))
+                else:
+                    path = self._normalize_input_path(item)
+
+                if reader is None:
+                    if not isinstance(path, str) or not os.path.isfile(path):
+                        return {"success": False, "error": f"File not found: {path}"}
+                    reader = PdfReader(path)
+
                 for page in reader.pages:
                     writer.add_page(page)
 
